@@ -12,6 +12,12 @@
   var MAX_IDLE_ROUNDS = 6;
   var MAX_TITLE_LENGTH = 120;
 
+  var MODE_LABELS = {
+    favorites: "收藏",
+    homepage: "首页",
+    following: "关注"
+  };
+
   var state = {
     items: new Map(),
     running: false,
@@ -22,7 +28,8 @@
     lastDomScanAt: 0,
     pageInfo: null,
     statusText: "等待页面就绪",
-    timerId: null
+    timerId: null,
+    mode: "favorites"
   };
 
   var ui = {
@@ -32,6 +39,7 @@
     tokenValue: null,
     sourceValue: null,
     statusValue: null,
+    modeValue: null,
     startButton: null,
     stopButton: null,
     exportButton: null,
@@ -86,6 +94,16 @@
       '.title{' +
       'font-size:15px;' +
       'font-weight:700;' +
+      'margin-bottom:6px;' +
+      '}' +
+      '.mode-badge{' +
+      'display:inline-block;' +
+      'font-size:11px;' +
+      'font-weight:600;' +
+      'background:#fff0e8;' +
+      'color:#c0392b;' +
+      'border-radius:6px;' +
+      'padding:2px 8px;' +
       'margin-bottom:10px;' +
       '}' +
       '.meta{' +
@@ -154,7 +172,8 @@
       '}' +
       '</style>' +
       '<div id="panel">' +
-      '<div class="title">小红书收藏导出器</div>' +
+      '<div class="title">小红书导出器</div>' +
+      '<div class="mode-badge" data-role="mode">收藏</div>' +
       '<div class="meta">' +
       '<div class="card"><div class="label">条目数</div><div class="value" data-role="count">0</div></div>' +
       '<div class="card"><div class="label">缺 token</div><div class="value" data-role="token-missing">0</div></div>' +
@@ -168,7 +187,7 @@
       '<button class="ghost" data-action="export">导出 JSON</button>' +
       '<button class="warn" data-action="reset" style="grid-column:1 / -1;">清空本次结果</button>' +
       '</div>' +
-      '<div class="hint">先打开小红书个人页的“收藏”Tab，再刷新一次页面。插件会读首屏 SSR，并拦截后续收藏分页的 XHR。</div>' +
+      '<div class="hint">先打开小红书对应页面，再刷新一次。插件会读首屏 SSR，并拦截后续分页 XHR。</div>' +
       "</div>";
 
     ui.host = host;
@@ -177,6 +196,7 @@
     ui.tokenValue = root.querySelector('[data-role="token-missing"]');
     ui.sourceValue = root.querySelector('[data-role="sources"]');
     ui.statusValue = root.querySelector('[data-role="status"]');
+    ui.modeValue = root.querySelector('[data-role="mode"]');
     ui.startButton = root.querySelector('[data-action="start"]');
     ui.stopButton = root.querySelector('[data-action="stop"]');
     ui.exportButton = root.querySelector('[data-action="export"]');
@@ -383,9 +403,18 @@
     return normalizeText(anchor.textContent);
   }
 
+  function domSource() {
+    return state.mode === "homepage"
+      ? "feed-home"
+      : state.mode === "following"
+        ? "feed-following"
+        : "dom";
+  }
+
   function scanDomCards() {
     var anchors = Array.from(document.querySelectorAll('a[href*="/explore/"]'));
     var payload = [];
+    var source = domSource();
 
     anchors.forEach(function collectAnchor(anchor) {
       var parsed = parseNoteIdFromHref(anchor.getAttribute("href") || anchor.href);
@@ -399,7 +428,7 @@
         xsec_token: parsed.xsec_token,
         url: parsed.url,
         title: extractTitleFromAnchor(anchor),
-        source: "dom",
+        source: source,
         captured_at: new Date().toISOString()
       });
     });
@@ -424,18 +453,42 @@
     var summary = {
       ssr: 0,
       xhr: 0,
-      dom: 0
+      dom: 0,
+      "feed-home": 0,
+      "feed-following": 0
     };
 
     state.items.forEach(function countItem(item) {
       (item.sources || []).forEach(function countSource(source) {
-        if (summary[source] != null) {
+        if (Object.prototype.hasOwnProperty.call(summary, source)) {
           summary[source] += 1;
         }
       });
     });
 
-    return "SSR " + summary.ssr + " / XHR " + summary.xhr + " / DOM " + summary.dom;
+    var parts = [];
+
+    if (summary.ssr > 0) {
+      parts.push("SSR " + summary.ssr);
+    }
+
+    if (summary.xhr > 0) {
+      parts.push("XHR " + summary.xhr);
+    }
+
+    if (summary.dom > 0) {
+      parts.push("DOM " + summary.dom);
+    }
+
+    if (summary["feed-home"] > 0) {
+      parts.push("首页 " + summary["feed-home"]);
+    }
+
+    if (summary["feed-following"] > 0) {
+      parts.push("关注 " + summary["feed-following"]);
+    }
+
+    return parts.length > 0 ? parts.join(" / ") : "尚未采集";
   }
 
   function render() {
@@ -447,6 +500,7 @@
     ui.tokenValue.textContent = String(countMissingTokens());
     ui.sourceValue.textContent = summarizeSources();
     ui.statusValue.innerHTML = escapeHtml(state.statusText);
+    ui.modeValue.textContent = "模式：" + (MODE_LABELS[state.mode] || state.mode);
     ui.startButton.disabled = state.running;
     ui.stopButton.disabled = !state.running;
     ui.exportButton.disabled = state.items.size === 0;
@@ -541,7 +595,7 @@
     state.idleRounds = 0;
     scanDomCards();
     requestInitialSnapshot();
-    setStatus("开始采集，准备滚动收藏页");
+    setStatus("开始采集，准备滚动页面");
     scheduleNextTick();
   }
 
@@ -567,6 +621,7 @@
     var payload = {
       exported_at: new Date().toISOString(),
       page_url: window.location.href,
+      feed: state.mode,
       total_items: items.length,
       missing_token_count: countMissingTokens(),
       page_info: state.pageInfo,
@@ -579,7 +634,9 @@
     var url = URL.createObjectURL(blob);
     var anchor = document.createElement("a");
     var fileName =
-      "xhs-favorites-" +
+      "xhs-" +
+      state.mode +
+      "-" +
       new Date().toISOString().replace(/[:.]/g, "-") +
       ".json";
 
@@ -604,7 +661,12 @@
 
     if (type === "BRIDGE_READY") {
       state.bridgeReady = true;
-      setStatus("注入完成。如果你是刚启用插件，现在刷新收藏页一次再开始采集");
+
+      if (payload.mode && payload.mode !== state.mode) {
+        state.mode = payload.mode;
+      }
+
+      setStatus("注入完成。如果你是刚启用插件，现在刷新页面一次再开始采集");
       return;
     }
 
@@ -623,6 +685,16 @@
       mergeItems(payload.items || []);
       setStatus(
         "已捕获收藏分页 XHR，目前 " + state.items.size + " 条"
+      );
+      return;
+    }
+
+    if (type === "FEED_PAGE") {
+      state.lastNetworkAt = Date.now();
+      state.pageInfo = payload.page || state.pageInfo;
+      mergeItems(payload.items || []);
+      setStatus(
+        "已捕获 Feed 分页 XHR，目前 " + state.items.size + " 条"
       );
       return;
     }
