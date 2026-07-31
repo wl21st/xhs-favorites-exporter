@@ -7,6 +7,7 @@
 
   var BRIDGE_SOURCE = "xhs-favorites-exporter";
   var COLLECT_PATH = "/api/sns/web/v2/note/collect/page";
+  var HOMEFEED_PATH = "/api/sns/web/v1/homefeed";
   var initialSnapshotSent = false;
   var pollAttempts = 0;
   var maxPollAttempts = 60;
@@ -96,6 +97,8 @@
 
     return pickFirst([
       cover && cover.url,
+      cover && cover.url_default,
+      cover && cover.urlDefault,
       cover && cover.default,
       cover && cover.src
     ]);
@@ -105,9 +108,9 @@
     return value == null ? null : String(value);
   }
 
-  function normalizeFavoriteItem(rawItem, source) {
+  function normalizeNoteItem(rawItem, source) {
     var item = unwrapReactive(rawItem) || {};
-    var noteCard = unwrapReactive(item.noteCard) || item;
+    var noteCard = unwrapReactive(item.noteCard) || unwrapReactive(item.note_card) || item;
     var user = unwrapReactive(noteCard.user) || unwrapReactive(item.user) || {};
     var interactInfo =
       unwrapReactive(noteCard.interactInfo) ||
@@ -178,7 +181,7 @@
     var query = unwrapReactive(rawQuery) || {};
 
     return {
-      cursor: toStringOrNull(pickFirst([query.cursor])),
+      cursor: toStringOrNull(pickFirst([query.cursor, query.cursor_score, query.cursorScore])),
       has_more: Boolean(
         pickFirst([query.hasMore, query.has_more, query.hasMore === false ? false : null])
       ),
@@ -237,13 +240,50 @@
 
     var normalizedItems = extractFavoriteItems(favoriteList)
       .map(function mapFavoriteItem(item) {
-        return normalizeFavoriteItem(item, "ssr");
+        return normalizeNoteItem(item, "ssr");
       })
       .filter(Boolean);
 
     return {
       items: normalizedItems,
       page: normalizePageInfo(favoriteQuery)
+    };
+  }
+
+  function readHomefeedSnapshot() {
+    var state = unwrapReactive(window.__INITIAL_STATE__);
+
+    if (!state) {
+      return null;
+    }
+
+    var feedState = unwrapReactive(state.feed);
+
+    if (!feedState) {
+      return null;
+    }
+
+    var feeds = unwrapReactive(feedState.feeds);
+
+    if (!feeds) {
+      return null;
+    }
+
+    var items = Array.isArray(feeds) ? feeds : [];
+
+    if (!items.length) {
+      return null;
+    }
+
+    var normalizedItems = items
+      .map(function mapFeedItem(item) {
+        return normalizeNoteItem(item, "ssr");
+      })
+      .filter(Boolean);
+
+    return {
+      items: normalizedItems,
+      page: { cursor: null, has_more: true, num: null, page: null }
     };
   }
 
@@ -276,11 +316,35 @@
     return false;
   }
 
-  function startInitialStatePolling() {
+  function tryEmitHomefeedSnapshot(force) {
+    var snapshot = readHomefeedSnapshot();
+
+    if (!snapshot) {
+      return false;
+    }
+
+    if (!force && initialSnapshotSent) {
+      return false;
+    }
+
+    if (snapshot.items.length > 0) {
+      emit("INITIAL_SNAPSHOT", snapshot);
+      initialSnapshotSent = true;
+      return true;
+    }
+
+    return false;
+  }
+
+  function startInitialStatePolling(isHomefeed) {
     var timer = window.setInterval(function pollInitialState() {
       pollAttempts += 1;
 
-      if (tryEmitInitialSnapshot(false) || pollAttempts >= maxPollAttempts) {
+      var emitted = isHomefeed
+        ? tryEmitHomefeedSnapshot(false)
+        : tryEmitInitialSnapshot(false);
+
+      if (emitted || pollAttempts >= maxPollAttempts) {
         window.clearInterval(timer);
       }
     }, 500);
@@ -314,66 +378,130 @@
       var meta = this.__xhsFavoritesExporterMeta;
       var startedAt = Date.now();
 
-      if (meta && meta.url && meta.url.indexOf(COLLECT_PATH) !== -1) {
-        this.addEventListener(
-          "load",
-          function onCollectPageLoaded() {
-            var responseUrl = this.responseURL || meta.url || "";
+      if (meta && meta.url) {
+        var isCollect = meta.url.indexOf(COLLECT_PATH) !== -1;
+        var isHomefeed = meta.url.indexOf(HOMEFEED_PATH) !== -1;
 
-            if (responseUrl.indexOf(COLLECT_PATH) === -1) {
-              return;
-            }
+        if (isCollect || isHomefeed) {
+          this.addEventListener(
+            "load",
+            function onXhrLoaded() {
+              var responseUrl = this.responseURL || meta.url || "";
+              var matchCollect = responseUrl.indexOf(COLLECT_PATH) !== -1;
+              var matchHomefeed = responseUrl.indexOf(HOMEFEED_PATH) !== -1;
 
-            var payload = parseCollectPayload(this.responseText);
+              if (!matchCollect && !matchHomefeed) {
+                return;
+              }
 
-            if (!payload) {
-              return;
-            }
+              var payload = parseCollectPayload(this.responseText);
 
-            var data = unwrapReactive(payload.data) || {};
-            var notes = Array.isArray(data.notes)
-              ? data.notes
-              : Array.isArray(data.note_list)
-                ? data.note_list
-                : [];
+              if (!payload) {
+                return;
+              }
 
-            emit("COLLECT_PAGE", {
-              status: this.status,
-              url: responseUrl,
-              duration_ms: Date.now() - startedAt,
-              page: {
-                cursor: toStringOrNull(pickFirst([data.cursor])),
-                has_more: Boolean(
-                  pickFirst([
-                    data.has_more,
-                    data.hasMore,
-                    data.has_more === false ? false : null
-                  ])
-                ),
-                num: data.num == null ? null : Number(data.num)
-              },
-              items: notes
-                .map(function mapApiItem(item) {
-                  return normalizeFavoriteItem(item, "xhr");
-                })
-                .filter(Boolean)
-            });
-          },
-          { once: true }
-        );
+              var data = unwrapReactive(payload.data) || {};
+
+              if (matchCollect) {
+                var notes = Array.isArray(data.notes)
+                  ? data.notes
+                  : Array.isArray(data.note_list)
+                    ? data.note_list
+                    : [];
+
+                emit("COLLECT_PAGE", {
+                  status: this.status,
+                  url: responseUrl,
+                  duration_ms: Date.now() - startedAt,
+                  page: {
+                    cursor: toStringOrNull(pickFirst([data.cursor])),
+                    has_more: Boolean(
+                      pickFirst([
+                        data.has_more,
+                        data.hasMore,
+                        data.has_more === false ? false : null
+                      ])
+                    ),
+                    num: data.num == null ? null : Number(data.num)
+                  },
+                  items: notes
+                    .map(function mapApiItem(item) {
+                      return normalizeNoteItem(item, "xhr");
+                    })
+                    .filter(Boolean)
+                });
+              }
+
+              if (matchHomefeed) {
+                var feedItems = Array.isArray(data.items) ? data.items : [];
+                var feedSource = currentMode === "following" ? "feed-following" : "feed-home";
+
+                emit("FEED_PAGE", {
+                  status: this.status,
+                  url: responseUrl,
+                  duration_ms: Date.now() - startedAt,
+                  page: {
+                    cursor: toStringOrNull(pickFirst([data.cursor_score, data.cursorScore, data.cursor])),
+                    has_more: data.items && data.items.length > 0
+                  },
+                  items: feedItems
+                    .filter(function keepNotes(item) {
+                      return !item.model_type || item.model_type === "note";
+                    })
+                    .map(function mapFeedItem(item) {
+                      return normalizeNoteItem(item, feedSource);
+                    })
+                    .filter(Boolean)
+                });
+              }
+            },
+            { once: true }
+          );
+        }
       }
 
       return originalSend.apply(this, arguments);
     };
   }
 
+  function detectMode() {
+    var path = window.location.pathname;
+
+    if (path === "/" || path === "") {
+      return "homepage";
+    }
+
+    if (path.indexOf("/following") !== -1) {
+      return "following";
+    }
+
+    if (
+      path.indexOf("/user/profile") !== -1 ||
+      path.indexOf("/collection") !== -1
+    ) {
+      return "favorites";
+    }
+
+    return "homepage";
+  }
+
+  var currentMode = detectMode();
+
   window.addEventListener("xhs-favorites-exporter:scan-now", function forceScan() {
-    tryEmitInitialSnapshot(true);
+    if (currentMode === "homepage" || currentMode === "following") {
+      tryEmitHomefeedSnapshot(true);
+    } else {
+      tryEmitInitialSnapshot(true);
+    }
   });
 
   installXmlHttpRequestHook();
-  startInitialStatePolling();
+
+  var isHomefeedMode = currentMode === "homepage" || currentMode === "following";
+  startInitialStatePolling(isHomefeedMode);
+
   emit("BRIDGE_READY", {
-    collect_path: COLLECT_PATH
+    collect_path: COLLECT_PATH,
+    mode: currentMode
   });
 })();
