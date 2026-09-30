@@ -3,7 +3,7 @@
 BUILD_DIR ?= dist
 PACKAGE_NAME ?= xhs-favorites-exporter.zip
 PACKAGE := $(BUILD_DIR)/$(PACKAGE_NAME)
-SOURCES := manifest.json content-script.js page-bridge.js
+SOURCES := manifest.json exporter-core.js content-script.js page-bridge.js
 
 .PHONY: all check lint test build clean help
 
@@ -20,7 +20,8 @@ test: ## Verify manifest-referenced resources exist
 	@set -eu; \
 	for file in $$(jq -r '.content_scripts[]?.js[]?, .web_accessible_resources[]?.resources[]?' manifest.json); do \
 		test -f "$$file" || { printf 'Missing resource: %s\n' "$$file" >&2; exit 1; }; \
-	done
+	done; \
+	node test/regression.js
 
 build: check ## Build the distributable Chrome extension archive
 	@mkdir -p $(BUILD_DIR)
