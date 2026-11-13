@@ -48,8 +48,9 @@
   };
 
   function injectPageBridge() {
+    var extensionApi = typeof browser !== "undefined" ? browser : chrome;
     var script = document.createElement("script");
-    script.src = chrome.runtime.getURL("page-bridge.js");
+    script.src = extensionApi.runtime.getURL("page-bridge.js");
     script.async = false;
     script.dataset.xhsFavoritesExporter = "true";
     script.addEventListener("load", function removeAfterLoad() {
